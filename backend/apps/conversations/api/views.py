@@ -1165,6 +1165,50 @@ class DismissCommunicationDiffView(APIView):
         })
 
 
+class DismissReconstructedFactView(APIView):
+    """POST /api/v1/insights/audit/owner-review/business-rule/dismiss
+
+    Body: { "tenantId": "...", "factId": "...", "dismissedBy": "owner" }
+
+    Owner-recorded decision to KEEP the configured default behavior for
+    this reconstructed fact. Idempotent; mirrors
+    DismissCommunicationDiffView. Added for LeadBridge PR4C-1's unified
+    review endpoint — brief §2 "Do not allow local-only dismissal": LB
+    refuses to mark a business rule dismissed unless BehaviorOS has
+    recorded the dismissal authoritatively.
+    """
+    authentication_classes = [InsightsServiceTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from apps.conversations.tenant_behavior_profile.service import (
+            dismiss_reconstructed_fact,
+        )
+        body = request.data or {}
+        tenant = (body.get('tenantId') or '').strip()
+        fact_id = (body.get('factId') or '').strip()
+        dismissed_by = (body.get('dismissedBy') or 'owner').strip()
+        if not tenant:
+            raise ValidationError({'tenantId': 'required'})
+        if not fact_id:
+            raise ValidationError({'factId': 'required'})
+        try:
+            fact = dismiss_reconstructed_fact(
+                tenant_external_id=tenant, fact_id=fact_id,
+                dismissed_by=dismissed_by,
+            )
+        except ValueError as exc:
+            raise ValidationError({'detail': str(exc)})
+        return Response({
+            'fact_id': str(fact.id),
+            'review_state': fact.review_state,
+            'reviewed_at': (
+                fact.reviewed_at.isoformat() if fact.reviewed_at else None
+            ),
+            'reviewed_by': fact.reviewed_by,
+        })
+
+
 class ApproveReconstructedFactView(APIView):
     """POST /api/v1/insights/audit/owner-review/business-rule/approve
 

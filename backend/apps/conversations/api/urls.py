@@ -17,6 +17,7 @@ from apps.conversations.api.views import (
     ConfiguredFaqRunView, ConfiguredPricingRunView,
     ConfiguredQualificationRunView, ConfiguredServiceScopeRunView,
     DismissCommunicationDiffView,
+    DismissReconstructedFactView,
     ExtractionRunStatusView,
     FreezeCorpusView,
     IngestCorpusView, IngestStatusView,
@@ -212,6 +213,11 @@ urlpatterns = _router.urls + [
         'audit/owner-review/business-rule/approve',
         ApproveReconstructedFactView.as_view(),
         name='insights-audit-owner-review-business-rule-approve',
+    ),
+    path(
+        'audit/owner-review/business-rule/dismiss',
+        DismissReconstructedFactView.as_view(),
+        name='insights-audit-owner-review-business-rule-dismiss',
     ),
     path(
         'audit/owner-review/custom-rule',
