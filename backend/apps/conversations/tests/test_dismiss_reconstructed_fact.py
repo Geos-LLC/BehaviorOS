@@ -178,30 +178,60 @@ class ApprovePathMirrorsReviewStateTests(TestCase):
         self.assertIn('already approved', str(ctx.exception).lower())
 
 
-class OwnerReviewPayloadDismissFilterTests(TestCase):
-    """Dismissed facts must NOT appear in the owner-review payload.
-    LeadBridge's adapter cannot distinguish dismissed from pending on
-    the wire (it only reads `already_approved`), so leaking a dismissed
-    fact would cause it to resurface in the LB inbox on every sync."""
+class OwnerReviewPayloadReviewStateTests(TestCase):
+    """The owner-review payload exposes EXPLICIT review_state per fact.
+    LeadBridge adapter uses this to drive its canonical ChangeReviewState
+    — never inferring dismissal from fact disappearance (LB PR4C-2 brief:
+    'Do not rely on disappearance from a snapshot to update review state')."""
 
-    def test_dismissed_fact_is_filtered_from_owner_review_payload(self):
+    def test_pending_fact_payload_review_state(self):
         from apps.conversations.tenant_behavior_profile.service import (
             _business_rules_payload,
         )
-        pending_fact = _mk_fact(tenant_external_id='tenant-a')
-        dismissed_fact = _mk_fact(tenant_external_id='tenant-a')
-        # Dismiss the second fact.
+        fact = _mk_fact(tenant_external_id='tenant-a')
+        payload = _business_rules_payload('tenant-a')
+        item = next(x for x in payload['items'] if x['fact_id'] == str(fact.id))
+        self.assertEqual(item['review_state'], 'pending')
+        self.assertFalse(item['already_approved'])
+        self.assertIsNone(item['reviewed_at'])
+        self.assertIsNone(item['reviewed_by'])
+
+    def test_dismissed_fact_appears_in_payload_with_review_state_dismissed(self):
+        """Dismissed facts are NOT filtered; they appear with explicit
+        state so the LB adapter can map them. This is the 'don't rely on
+        disappearance' invariant."""
+        from apps.conversations.tenant_behavior_profile.service import (
+            _business_rules_payload,
+        )
+        fact = _mk_fact(tenant_external_id='tenant-a')
         dismiss_reconstructed_fact(
             tenant_external_id='tenant-a',
-            fact_id=str(dismissed_fact.id),
+            fact_id=str(fact.id),
             dismissed_by='owner@example.com',
         )
-
         payload = _business_rules_payload('tenant-a')
-        ids_in_payload = {item['fact_id'] for item in payload['items']}
+        item = next(x for x in payload['items'] if x['fact_id'] == str(fact.id))
+        self.assertEqual(item['review_state'], 'dismissed')
+        self.assertFalse(item['already_approved'])
+        self.assertIsNotNone(item['reviewed_at'])
+        self.assertEqual(item['reviewed_by'], 'owner@example.com')
 
-        self.assertIn(str(pending_fact.id), ids_in_payload)
-        self.assertNotIn(str(dismissed_fact.id), ids_in_payload)
+    def test_approved_fact_appears_in_payload_with_review_state_approved(self):
+        from apps.conversations.tenant_behavior_profile.service import (
+            _business_rules_payload,
+            approve_reconstructed_fact,
+        )
+        fact = _mk_fact(tenant_external_id='tenant-a')
+        approve_reconstructed_fact(
+            tenant_external_id='tenant-a',
+            fact_id=str(fact.id),
+            approved_by='owner@example.com',
+        )
+        payload = _business_rules_payload('tenant-a')
+        item = next(x for x in payload['items'] if x['fact_id'] == str(fact.id))
+        self.assertEqual(item['review_state'], 'approved')
+        # Legacy signal also set (via TBP overrides).
+        self.assertTrue(item['already_approved'])
 
 
 class DismissReconstructedFactViewTests(TestCase):

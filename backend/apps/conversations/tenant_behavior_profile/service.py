@@ -507,17 +507,17 @@ def _business_rules_payload(tenant_external_id: str) -> dict:
     )
     if run is None:
         return {'note': 'no reconstruction run yet', 'items': []}
-    # Exclude dismissed facts from the owner-review payload. LeadBridge's
-    # adapter today only distinguishes `already_approved` (via TBP
-    # overrides lookup) vs pending — it has no way to detect a dismissal
-    # from the wire payload. Filtering here means a dismissed fact stops
-    # appearing in the review backlog immediately on the next sync.
-    # (DO_NOT_PROPOSE exclusion is unchanged — same backlog-hiding intent.)
+    # Note: DISMISSED facts are kept in the payload intentionally.
+    # LeadBridge's adapter reads the explicit `review_state` field (added
+    # below) to drive its own ChangeReviewState — we never rely on a
+    # fact DISAPPEARING from the payload to infer dismissal. Flaky syncs
+    # or network errors could otherwise cause a stale snapshot to be
+    # misread as "everything is pending again". See the LB PR4C-2 brief:
+    # "Do not rely on disappearance from a snapshot to update review state."
     facts = list(
         ReconstructedBusinessFact.objects
         .filter(reconstruction_run=run)
         .exclude(onboarding_class='DO_NOT_PROPOSE')
-        .exclude(review_state=ReconstructedBusinessFact.ReviewState.DISMISSED)
         .order_by('-support_n')
     )
     current = get_latest_profile(tenant_external_id=tenant_external_id)
@@ -540,7 +540,18 @@ def _business_rules_payload(tenant_external_id: str) -> dict:
             'consistency': f.consistency,
             'onboarding_class': f.onboarding_class,
             'rationale': f.onboarding_rationale,
+            # Legacy signal — still derived from TBP overrides so existing
+            # LB consumers that only read `already_approved` keep working.
             'already_approved': str(f.id) in approved_source_ids,
+            # EXPLICIT review state (added for LB PR4C-1). Values:
+            # 'pending' | 'approved' | 'dismissed'. LB's adapter must
+            # map this to canonical ChangeReviewState rather than
+            # inferring from `already_approved` or fact disappearance.
+            'review_state': f.review_state,
+            'reviewed_at': (
+                f.reviewed_at.isoformat() if f.reviewed_at else None
+            ),
+            'reviewed_by': f.reviewed_by or None,
         })
     return {
         'reconstruction_run_id': str(run.id),
