@@ -406,6 +406,20 @@ def approve_reconstructed_fact(
             ),
             approved_at=now,
         )
+        # Mirror the approval onto the fact row so the dismiss path's
+        # "cannot dismiss an already-approved fact" invariant has a
+        # truthful state to check. Without this, the fact stays
+        # review_state='pending' and dismiss_reconstructed_fact would
+        # silently proceed even though the approval is persisted on TBP.
+        # The existing `already_approved` wire derivation (TBP lookup)
+        # is unchanged — this field is a local-rowmirror, not a
+        # protocol change.
+        fact.review_state = ReconstructedBusinessFact.ReviewState.APPROVED
+        fact.reviewed_at = now
+        fact.reviewed_by = approved_by
+        fact.save(update_fields=[
+            'review_state', 'reviewed_at', 'reviewed_by', 'updated_at',
+        ])
         return tbp
 
 
@@ -493,10 +507,17 @@ def _business_rules_payload(tenant_external_id: str) -> dict:
     )
     if run is None:
         return {'note': 'no reconstruction run yet', 'items': []}
+    # Exclude dismissed facts from the owner-review payload. LeadBridge's
+    # adapter today only distinguishes `already_approved` (via TBP
+    # overrides lookup) vs pending — it has no way to detect a dismissal
+    # from the wire payload. Filtering here means a dismissed fact stops
+    # appearing in the review backlog immediately on the next sync.
+    # (DO_NOT_PROPOSE exclusion is unchanged — same backlog-hiding intent.)
     facts = list(
         ReconstructedBusinessFact.objects
         .filter(reconstruction_run=run)
         .exclude(onboarding_class='DO_NOT_PROPOSE')
+        .exclude(review_state=ReconstructedBusinessFact.ReviewState.DISMISSED)
         .order_by('-support_n')
     )
     current = get_latest_profile(tenant_external_id=tenant_external_id)

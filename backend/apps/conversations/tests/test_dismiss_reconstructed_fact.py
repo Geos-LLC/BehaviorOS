@@ -132,6 +132,78 @@ class DismissReconstructedFactServiceTests(TestCase):
         )
 
 
+class ApprovePathMirrorsReviewStateTests(TestCase):
+    """Approve mirrors review_state=APPROVED on the fact row so the
+    dismiss guard can refuse. Previously the approve path only touched
+    TBP.business_rule_overrides and left fact.review_state='pending',
+    which made the dismiss-after-approve guard non-functional."""
+
+    def test_approve_sets_fact_review_state_to_approved(self):
+        from apps.conversations.tenant_behavior_profile.service import (
+            approve_reconstructed_fact,
+        )
+        fact = _mk_fact(tenant_external_id='tenant-a')
+        self.assertEqual(fact.review_state, ReconstructedBusinessFact.ReviewState.PENDING)
+
+        approve_reconstructed_fact(
+            tenant_external_id='tenant-a',
+            fact_id=str(fact.id),
+            approved_by='owner@example.com',
+        )
+
+        reloaded = ReconstructedBusinessFact.objects.get(pk=fact.id)
+        self.assertEqual(reloaded.review_state, ReconstructedBusinessFact.ReviewState.APPROVED)
+        self.assertIsNotNone(reloaded.reviewed_at)
+        self.assertEqual(reloaded.reviewed_by, 'owner@example.com')
+
+    def test_dismiss_after_approve_is_refused(self):
+        """End-to-end invariant: approve → dismiss raises ValueError,
+        because the approve path now sets review_state='approved' and the
+        dismiss guard checks for it."""
+        from apps.conversations.tenant_behavior_profile.service import (
+            approve_reconstructed_fact,
+        )
+        fact = _mk_fact(tenant_external_id='tenant-a')
+        approve_reconstructed_fact(
+            tenant_external_id='tenant-a',
+            fact_id=str(fact.id),
+            approved_by='owner@example.com',
+        )
+        with self.assertRaises(ValueError) as ctx:
+            dismiss_reconstructed_fact(
+                tenant_external_id='tenant-a',
+                fact_id=str(fact.id),
+                dismissed_by='owner@example.com',
+            )
+        self.assertIn('already approved', str(ctx.exception).lower())
+
+
+class OwnerReviewPayloadDismissFilterTests(TestCase):
+    """Dismissed facts must NOT appear in the owner-review payload.
+    LeadBridge's adapter cannot distinguish dismissed from pending on
+    the wire (it only reads `already_approved`), so leaking a dismissed
+    fact would cause it to resurface in the LB inbox on every sync."""
+
+    def test_dismissed_fact_is_filtered_from_owner_review_payload(self):
+        from apps.conversations.tenant_behavior_profile.service import (
+            _business_rules_payload,
+        )
+        pending_fact = _mk_fact(tenant_external_id='tenant-a')
+        dismissed_fact = _mk_fact(tenant_external_id='tenant-a')
+        # Dismiss the second fact.
+        dismiss_reconstructed_fact(
+            tenant_external_id='tenant-a',
+            fact_id=str(dismissed_fact.id),
+            dismissed_by='owner@example.com',
+        )
+
+        payload = _business_rules_payload('tenant-a')
+        ids_in_payload = {item['fact_id'] for item in payload['items']}
+
+        self.assertIn(str(pending_fact.id), ids_in_payload)
+        self.assertNotIn(str(dismissed_fact.id), ids_in_payload)
+
+
 class DismissReconstructedFactViewTests(TestCase):
     """The HTTP surface. Assumes test-settings-level auth bypass (shared
     insights token) since we're not exercising token auth here — that's
