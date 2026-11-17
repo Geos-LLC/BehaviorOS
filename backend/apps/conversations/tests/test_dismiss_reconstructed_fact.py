@@ -45,6 +45,8 @@ def _mk_fact(tenant_external_id='tenant-a', **fact_overrides):
         tenant_external_id=tenant_external_id,
         snapshot=snap,
         reconstruction_version='v1-test',
+        # _business_rules_payload only surfaces facts from COMPLETED runs.
+        status=UnifiedBusinessReconstructionRun.Status.COMPLETED,
     )
     fact_defaults = dict(
         reconstruction_run=run,
