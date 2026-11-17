@@ -276,6 +276,55 @@ def dismiss_communication_diff(*, diff_id: str) -> CommunicationProfileDiff:
     return diff
 
 
+def dismiss_reconstructed_fact(
+    *, tenant_external_id: str, fact_id: str,
+    dismissed_by: str = 'owner',
+) -> 'ReconstructedBusinessFact':
+    """Owner chose to keep the default behavior for this fact. Marks the
+    fact dismissed WITHOUT creating a TenantBehaviorProfile override —
+    "dismiss" means "the configured default is correct", which is what
+    no override already does. No profile_version bump.
+
+    Enforces tenant ownership: the fact's reconstruction_run must belong
+    to the caller's tenant; cross-tenant dismissal raises ValueError
+    (which the API view surfaces as a 400 ValidationError, same
+    semantics as approve_reconstructed_fact).
+
+    Idempotent: a second dismiss on a fact already in state=DISMISSED
+    is a no-op (returns the fact unchanged). An attempt to dismiss a
+    fact already in state=APPROVED raises ValueError — flipping an
+    approved business rule to dismissed would leave the TBP override
+    orphaned; the owner must explicitly revert the approval first.
+    """
+    with transaction.atomic():
+        fact = (
+            ReconstructedBusinessFact.objects
+            .select_related('reconstruction_run')
+            .select_for_update()
+            .get(pk=fact_id)
+        )
+        run = fact.reconstruction_run
+        if run.tenant_external_id != tenant_external_id:
+            raise ValueError(
+                f'fact {fact_id} belongs to tenant '
+                f'{run.tenant_external_id}, not {tenant_external_id}'
+            )
+        if fact.review_state == ReconstructedBusinessFact.ReviewState.APPROVED:
+            raise ValueError(
+                f'fact {fact_id} is already approved — cannot dismiss. '
+                f'Revert the business rule override first.'
+            )
+        if fact.review_state == ReconstructedBusinessFact.ReviewState.DISMISSED:
+            return fact  # idempotent
+        fact.review_state = ReconstructedBusinessFact.ReviewState.DISMISSED
+        fact.reviewed_at = timezone.now()
+        fact.reviewed_by = dismissed_by
+        fact.save(update_fields=[
+            'review_state', 'reviewed_at', 'reviewed_by', 'updated_at',
+        ])
+        return fact
+
+
 def approve_reconstructed_fact(
     *, tenant_external_id: str, fact_id: str,
     approved_by: str = 'owner',
@@ -357,6 +406,20 @@ def approve_reconstructed_fact(
             ),
             approved_at=now,
         )
+        # Mirror the approval onto the fact row so the dismiss path's
+        # "cannot dismiss an already-approved fact" invariant has a
+        # truthful state to check. Without this, the fact stays
+        # review_state='pending' and dismiss_reconstructed_fact would
+        # silently proceed even though the approval is persisted on TBP.
+        # The existing `already_approved` wire derivation (TBP lookup)
+        # is unchanged — this field is a local-rowmirror, not a
+        # protocol change.
+        fact.review_state = ReconstructedBusinessFact.ReviewState.APPROVED
+        fact.reviewed_at = now
+        fact.reviewed_by = approved_by
+        fact.save(update_fields=[
+            'review_state', 'reviewed_at', 'reviewed_by', 'updated_at',
+        ])
         return tbp
 
 
@@ -444,6 +507,13 @@ def _business_rules_payload(tenant_external_id: str) -> dict:
     )
     if run is None:
         return {'note': 'no reconstruction run yet', 'items': []}
+    # Note: DISMISSED facts are kept in the payload intentionally.
+    # LeadBridge's adapter reads the explicit `review_state` field (added
+    # below) to drive its own ChangeReviewState — we never rely on a
+    # fact DISAPPEARING from the payload to infer dismissal. Flaky syncs
+    # or network errors could otherwise cause a stale snapshot to be
+    # misread as "everything is pending again". See the LB PR4C-2 brief:
+    # "Do not rely on disappearance from a snapshot to update review state."
     facts = list(
         ReconstructedBusinessFact.objects
         .filter(reconstruction_run=run)
@@ -470,7 +540,18 @@ def _business_rules_payload(tenant_external_id: str) -> dict:
             'consistency': f.consistency,
             'onboarding_class': f.onboarding_class,
             'rationale': f.onboarding_rationale,
+            # Legacy signal — still derived from TBP overrides so existing
+            # LB consumers that only read `already_approved` keep working.
             'already_approved': str(f.id) in approved_source_ids,
+            # EXPLICIT review state (added for LB PR4C-1). Values:
+            # 'pending' | 'approved' | 'dismissed'. LB's adapter must
+            # map this to canonical ChangeReviewState rather than
+            # inferring from `already_approved` or fact disappearance.
+            'review_state': f.review_state,
+            'reviewed_at': (
+                f.reviewed_at.isoformat() if f.reviewed_at else None
+            ),
+            'reviewed_by': f.reviewed_by or None,
         })
     return {
         'reconstruction_run_id': str(run.id),

@@ -2483,6 +2483,38 @@ class ReconstructedBusinessFact(BaseModel):
         default=list, blank=True,
     )
 
+    # ─── Owner review lifecycle (LB PR4C-1 dependency) ────────────────
+    #
+    # `review_state` tracks the owner's decision on this fact. The
+    # existing approve path (`approve_reconstructed_fact`) records the
+    # fact on `TenantBehaviorProfile.business_rule_overrides`; the new
+    # dismiss path (`dismiss_reconstructed_fact`) marks the fact
+    # DISMISSED without creating a profile override — symmetrical with
+    # `CommunicationProfileDiff.dismiss`. Both operations are
+    # idempotent: a second call with the same state is a no-op.
+    #
+    # Dismissals are NOT additive to the profile (no profile_version
+    # bump) because they represent "keep the default behavior", which
+    # is what no override already does. The state is still persisted
+    # so the owner UI can filter dismissed candidates out of the
+    # review backlog.
+    class ReviewState(models.TextChoices):
+        PENDING = 'pending', 'Pending review'
+        APPROVED = 'approved', 'Approved — recorded as business rule override'
+        DISMISSED = 'dismissed', 'Dismissed — keep default behavior'
+
+    review_state = models.CharField(
+        max_length=16,
+        choices=ReviewState.choices,
+        default=ReviewState.PENDING,
+        db_index=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.CharField(
+        max_length=128, blank=True, default='',
+        help_text='Owner email or "owner" sentinel when the actor is not identifiable.',
+    )
+
     class Meta:
         indexes = [
             models.Index(
@@ -2496,6 +2528,10 @@ class ReconstructedBusinessFact(BaseModel):
             ),
             models.Index(
                 fields=['reconstruction_run', 'onboarding_class'],
+            ),
+            # Owner-review backlog listings filter by review_state.
+            models.Index(
+                fields=['reconstruction_run', 'review_state'],
             ),
         ]
         ordering = ['-created_at']
