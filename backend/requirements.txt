@@ -5,7 +5,15 @@ django-cors-headers>=4.4,<5.0
 django-filter>=24.0,<25.0
 dj-database-url>=2.2,<3.0
 psycopg2-binary>=2.9,<3.0
-celery>=5.4,<6.0
+celery>=5.4,<5.7
+# PR4D-2A-FIX: kombu is a transitive dep of celery; pin it explicitly
+# below 5.7 because kombu 5.7.0 raised the Redis transport's redis-py
+# requirement to >=6.1 (install-time: >=6.4) which is incompatible with
+# our `redis<6.0` pin. Prod worker crashed on the first rebuild in 2.5
+# months when pip resolved celery 5.7.0 + kombu 5.7.0 + redis-py 5.3.1.
+# The celery<5.7 cap above already forces this transitively (celery 5.7
+# requires kombu>=5.7); the explicit kombu pin makes the WHY visible.
+kombu>=5.4,<5.7
 redis>=5.0,<6.0
 stripe>=10.0,<11.0
 requests>=2.32,<3.0
